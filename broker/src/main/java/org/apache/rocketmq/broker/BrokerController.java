@@ -2020,6 +2020,7 @@ public class BrokerController {
         if (isScheduleServiceStart != shouldStart) {
             LOG.info("ScheduleServiceStatus changed to {}", shouldStart);
             if (shouldStart) {
+                // 这里已经是 synchronized 方法，为什么 start 还要做 CAS，是不是还会有其他地方调用 start method
                 this.scheduleMessageService.start();
             } else {
                 this.scheduleMessageService.stop();

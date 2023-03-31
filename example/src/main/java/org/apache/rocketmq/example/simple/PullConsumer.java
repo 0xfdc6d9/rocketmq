@@ -32,6 +32,12 @@ import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
 import org.apache.rocketmq.remoting.exception.RemotingException;
 
+/*
+PullConsumer是一种主动的消费方式，消费者需要主动从消息服务器中拉取消息。
+消费者可以根据需要控制每次拉取的消息数量，并且可以通过自己的业务逻辑来控制消息的消费速度。
+因此，PullConsumer的主语是消费者，它主动从消息服务器中拉取消息。
+ */
+
 @SuppressWarnings("deprecation")
 public class PullConsumer {
 

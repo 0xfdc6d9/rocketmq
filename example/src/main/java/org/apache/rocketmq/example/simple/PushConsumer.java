@@ -25,10 +25,16 @@ import org.apache.rocketmq.client.exception.MQClientException;
 import org.apache.rocketmq.common.consumer.ConsumeFromWhere;
 import org.apache.rocketmq.common.message.MessageExt;
 
+/*
+PushConsumer是一种被动的消费方式，消费者需要向消息服务器注册一个监听器，当有消息到达时，消息服务器会主动将消息推送给消费者。
+因此，PushConsumer的主语是消息服务器（即 Broker），它主动将消息推送给消费者。
+ */
+
 public class PushConsumer {
 
     public static void main(String[] args) throws InterruptedException, MQClientException {
         DefaultMQPushConsumer consumer = new DefaultMQPushConsumer("CID_JODIE_1");
+        consumer.setNamesrvAddr("localhost:9876");
         consumer.subscribe("TopicTest", "*");
         consumer.setConsumeFromWhere(ConsumeFromWhere.CONSUME_FROM_FIRST_OFFSET);
         //wrong time format 2017_0422_221800

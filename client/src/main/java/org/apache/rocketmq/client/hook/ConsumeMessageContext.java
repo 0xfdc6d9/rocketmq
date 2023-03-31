@@ -21,6 +21,14 @@ import java.util.Map;
 import org.apache.rocketmq.common.message.MessageExt;
 import org.apache.rocketmq.common.message.MessageQueue;
 
+/*
+封装了消费者客户端消费消息的相关信息
+
+ConsumeMessageContext类是RocketMQ消费消息时用于传递上下文信息的类。
+它在消费者客户端的DefaultMQPushConsumerImpl/DefaultMQPullConsumerImpl类中被广泛使用，主要用于传递消费消息的相关信息，
+如消息的Topic、Tag、消费者组、消息的消费进度等。
+ */
+
 public class ConsumeMessageContext {
     private String consumerGroup;
     private List<MessageExt> msgList;

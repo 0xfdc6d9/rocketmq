@@ -65,12 +65,27 @@ import static org.apache.rocketmq.broker.metrics.BrokerMetricsConstant.LABEL_IS_
 import static org.apache.rocketmq.broker.metrics.BrokerMetricsConstant.LABEL_MESSAGE_TYPE;
 import static org.apache.rocketmq.broker.metrics.BrokerMetricsConstant.LABEL_TOPIC;
 
+/*
+1. 延迟消息存储：当生产者发送延迟消息时，ScheduleMessageService会根据消息的延迟时间计算出消息的延迟级别，并将消息存储到对应的延迟级别队列中。
+    存储完成后，延迟消息就可以在延迟队列中等待到期时间到来，然后被投递到消息消费者。
+2. 定期扫描延迟队列：ScheduleMessageService会启动一个定时任务线程，定期扫描延迟队列中到期的消息，并将其投递给消息消费者。
+    在扫描过程中，ScheduleMessageService会使用内存映射文件来提高延迟队列的处理效率。
+3. 消息投递：当延迟队列中的消息到达过期时间时，ScheduleMessageService会将消息投递给消息消费者进行消费。
+    在消息投递过程中，ScheduleMessageService会根据消息的消费状态进行处理，包括修改消息的重试次数、更新消息的消费状态等。
+ */
+
+/**
+ * 负责将延迟消息存储到延迟队列中，并定期扫描延迟队列中到期的消息，将其投递给消息消费者。
+ */
 public class ScheduleMessageService extends ConfigManager {
     private static final Logger log = LoggerFactory.getLogger(LoggerName.BROKER_LOGGER_NAME);
 
     private static final long FIRST_DELAY_TIME = 1000L;
     private static final long DELAY_FOR_A_WHILE = 100L;
     private static final long DELAY_FOR_A_PERIOD = 10000L;
+    /**
+     * 关闭线程池的等待时间
+     */
     private static final long WAIT_FOR_SHUTDOWN = 5000L;
     private static final long DELAY_FOR_A_SLEEP = 10L;
 
@@ -80,12 +95,21 @@ public class ScheduleMessageService extends ConfigManager {
     private final ConcurrentMap<Integer /* level */, Long/* offset */> offsetTable =
         new ConcurrentHashMap<>(32);
     private final AtomicBoolean started = new AtomicBoolean(false);
+    /**
+     * 延时任务线程池
+     */
     private ScheduledExecutorService deliverExecutorService;
+    /**
+     * 最大延时等级
+     */
     private int maxDelayLevel;
     private DataVersion dataVersion = new DataVersion();
     private boolean enableAsyncDeliver = false;
     private ScheduledExecutorService handleExecutorService;
     private final ScheduledExecutorService scheduledPersistService;
+    /**
+     * key：延时等级，value：阻塞队列
+     */
     private final Map<Integer /* level */, LinkedBlockingQueue<PutResultProcess>> deliverPendingTable =
         new ConcurrentHashMap<>(32);
     private final BrokerController brokerController;
@@ -147,8 +171,10 @@ public class ScheduleMessageService extends ConfigManager {
     }
 
     public void start() {
+        // CAS 操作控制并发
         if (started.compareAndSet(false, true)) {
             this.load();
+            // 创建延时任务线程池
             this.deliverExecutorService = new ScheduledThreadPoolExecutor(this.maxDelayLevel, new ThreadFactoryImpl("ScheduleMessageTimerThread_"));
             if (this.enableAsyncDeliver) {
                 this.handleExecutorService = new ScheduledThreadPoolExecutor(this.maxDelayLevel, new ThreadFactoryImpl("ScheduleMessageExecutorHandleThread_"));
@@ -169,6 +195,7 @@ public class ScheduleMessageService extends ConfigManager {
                 }
             }
 
+            // 定期将延迟队列中的消息持久化到磁盘中
             this.deliverExecutorService.scheduleAtFixedRate(new Runnable() {
 
                 @Override
@@ -239,6 +266,10 @@ public class ScheduleMessageService extends ConfigManager {
         return this.encode(false);
     }
 
+    /**
+     * 解析延时等级和修正延时队列偏移量
+     * @return 两个操作是否都执行成功
+     */
     @Override
     public boolean load() {
         boolean result = super.load();
@@ -247,30 +278,62 @@ public class ScheduleMessageService extends ConfigManager {
         return result;
     }
 
+    /**
+     * 检查延迟队列的偏移量是否正确，并对不正确的偏移量进行修正。
+     * @return 处理是否成功
+     */
     public boolean correctDelayOffset() {
+
+        /**
+         * 如果偏移量不正确，就会导致延迟消息的顺序出现问题，甚至导致消息丢失。
+         * 在某些情况下，例如broker重启、网络异常等，会导致延迟队列的偏移量出现异常，这时需要对偏移量进行修正。
+         */
+
         try {
+            // 遍历所有的延迟级别
             for (int delayLevel : delayLevelTable.keySet()) {
                 ConsumeQueueInterface cq =
                     brokerController.getMessageStore().getQueueStore().findOrCreateConsumeQueue(TopicValidator.RMQ_SYS_SCHEDULE_TOPIC,
                         delayLevel2QueueId(delayLevel));
+                // 获取当前延迟级别的偏移量
                 Long currentDelayOffset = offsetTable.get(delayLevel);
                 if (currentDelayOffset == null || cq == null) {
                     continue;
                 }
                 long correctDelayOffset = currentDelayOffset;
+
+                /*
+                最小偏移量和最大偏移量是根据消费队列中消息的存储情况来确定的。
+
+                在RocketMQ中，每个消费队列都对应一个物理文件，存储了该队列中的所有消息。
+                每个物理文件被分成若干个消息存储区间（Message Chunk），每个存储区间存储一定数量的消息。
+                每个消息在存储时都会被分配一个偏移量，偏移量从0开始递增。
+
+                最小偏移量是指消费队列中第一条消息的偏移量，最大偏移量是指消费队列中最后一条消息的偏移量。
+                在RocketMQ中，消费队列维护了每个存储区间的最小和最大偏移量，以及整个队列的最小和最大偏移量。
+                通过查询消费队列的最小和最大偏移量，可以确定消费队列中的消息存储情况，从而进行偏移量的修正。
+
+                需要注意的是，最小偏移量和最大偏移量只是一个大致的范围，因为消费队列中的消息可能会被删除或者重复消费，导致消息的偏移量不连续。
+                在实际应用中，需要根据具体的情况进行处理，例如通过消息的唯一标识符进行去重，或者针对缺失的消息进行重试等。
+                 */
+
+                // 获取对应消费队列的最小偏移量和最大偏移量
                 long cqMinOffset = cq.getMinOffsetInQueue();
                 long cqMaxOffset = cq.getMaxOffsetInQueue();
+                // 如果当前偏移量小于最小偏移量，说明有些延迟消息还没有被消费，则将偏移量修正为最小偏移量
                 if (currentDelayOffset < cqMinOffset) {
                     correctDelayOffset = cqMinOffset;
                     log.error("schedule CQ offset invalid. offset={}, cqMinOffset={}, cqMaxOffset={}, queueId={}",
                         currentDelayOffset, cqMinOffset, cqMaxOffset, cq.getQueueId());
                 }
 
+                // 如果当前偏移量大于最大偏移量，说明有些延迟消息已经过期，则将偏移量修正为最大偏移量
                 if (currentDelayOffset > cqMaxOffset) {
                     correctDelayOffset = cqMaxOffset;
                     log.error("schedule CQ offset invalid. offset={}, cqMinOffset={}, cqMaxOffset={}, queueId={}",
                         currentDelayOffset, cqMinOffset, cqMaxOffset, cq.getQueueId());
                 }
+                // 如果修正后的偏移量不等于原始偏移量，则将修正后的偏移量更新到偏移量表中
                 if (correctDelayOffset != currentDelayOffset) {
                     log.error("correct delay offset [ delayLevel {} ] from {} to {}", delayLevel, currentDelayOffset, correctDelayOffset);
                     offsetTable.put(delayLevel, correctDelayOffset);
@@ -312,6 +375,10 @@ public class ScheduleMessageService extends ConfigManager {
         return delayOffsetSerializeWrapper.toJson(prettyFormat);
     }
 
+    /**
+     * 解析延时等级，按不同的延时等级创建不同的延时队列
+     * @return 操作是否成功
+     */
     public boolean parseDelayLevel() {
         HashMap<String, Long> timeUnitTable = new HashMap<>();
         timeUnitTable.put("s", 1000L);
